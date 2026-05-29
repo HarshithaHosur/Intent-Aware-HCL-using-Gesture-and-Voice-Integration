@@ -13,6 +13,7 @@ class SystemLogger:
         except Exception as e:
             print(f"[Logger Error] Could not connect to MongoDB: {e}")
             self.enabled = False
+            
 
     def log_event(self, event_type, command, action, status="completed", details=None):
         if not self.enabled:

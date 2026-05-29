@@ -5,4 +5,3 @@ build/
 *.exe
 error_log.txt
 .env
-node_modules/
