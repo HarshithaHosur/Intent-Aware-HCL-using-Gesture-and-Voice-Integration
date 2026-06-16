@@ -44,19 +44,19 @@ CAM_H = 480
 # unreliable. Instead we map a central region of the camera to
 # the full screen. This makes it easier to reach all corners.
 # Values are fractions of the camera frame (0.0 – 1.0).
-MAP_X_MIN = 0.15   # left 15% ignored
-MAP_X_MAX = 0.85   # right 15% ignored
-MAP_Y_MIN = 0.12   # top 12% ignored
-MAP_Y_MAX = 0.88   # bottom 12% ignored
+MAP_X_MIN = 0.20   # left 20% ignored
+MAP_X_MAX = 0.80   # right 20% ignored
+MAP_Y_MIN = 0.20   # top 20% ignored
+MAP_Y_MAX = 0.80   # bottom 20% ignored
 
 # ── Smoothing ──
 # Exponential smoothing factor (0.0 = max smooth, 1.0 = no smooth)
 # Lower = smoother but more latency; higher = faster but jitterier
-SMOOTHING_FACTOR = 0.35
+SMOOTHING_FACTOR = 0.70
 
 # ── Dead Zone ──
 # Ignore cursor movements smaller than this many pixels on screen
-DEAD_ZONE_PX = 6
+DEAD_ZONE_PX = 2
 
 # ── Click / Pinch Detection ──
 # Distance threshold (in normalised landmark units) for pinch
@@ -66,9 +66,13 @@ PINCH_THRESHOLD = 0.055
 # Right-click pinch threshold (thumb + middle finger)
 RIGHT_PINCH_THRESHOLD = 0.055
 
-# ── Click Debounce ──
-# Minimum time (seconds) between two successive click triggers
-CLICK_COOLDOWN = 0.5
+# ── Gesture Stability ──
+# Every cursor action (click, drag) must be held for this many seconds
+PINCH_STABILITY_TIME = 2.0
+
+# ── Click Cooldown ──
+# Minimum time (seconds) after an action before the next can trigger
+CLICK_COOLDOWN = 1.0
 
 # ── Drag Detection ──
 # How many consecutive "pinch held" frames before we enter drag mode
@@ -158,6 +162,9 @@ class CursorController:
     """
     System-level virtual mouse driven by hand tracking.
 
+    All click / drag actions require a 3-second pinch hold before
+    executing.  After execution a 1-second cooldown is enforced.
+
     Usage each frame (when mode == "cursor"):
         controller.update(hand_landmarks, frame_image)
 
@@ -179,18 +186,24 @@ class CursorController:
         self.last_tap_time = 0
         self.drag_active = False
 
-        # ── Click states ──
-        self.left_click_time = 0
-        self.right_click_time = 0
+        # ── Click states (with 3-second hold verification) ──
+        self.left_click_time = 0          # last execution timestamp
+        self.right_click_time = 0         # last execution timestamp
         self.left_pinching = False
         self.right_pinching = False
         self.pinch_hold_frames = 0
+
+        # ── 3-second stability tracking for pinch actions ──
+        self.left_pinch_start = None      # timestamp when left pinch first detected
+        self.left_pinch_fired = False     # True once the 3 s hold has triggered
+        self.right_pinch_start = None     # timestamp when right pinch first detected
+        self.right_pinch_fired = False    # True once the 3 s hold has triggered
 
     # ────────────────────────────────────────────────────
     #  PUBLIC API
     # ────────────────────────────────────────────────────
 
-    def update(self, landmarks, img):
+    def update(self, landmarks, img, context='default'):
         info = {
             'cursor_pos': (0, 0),
             'left_click': False,
@@ -220,6 +233,12 @@ class CursorController:
             if self.drag_active:
                 pyautogui.mouseUp(button='left', _pause=False)
                 self.drag_active = False
+            # Reset pinch hold trackers on peace sign
+            self.left_pinch_start = None
+            self.left_pinch_fired = False
+            self.right_pinch_start = None
+            self.right_pinch_fired = False
+            self.pinch_hold_frames = 0
             return info
 
         # ── 3. Map to screen & Smoothing ──
@@ -242,33 +261,92 @@ class CursorController:
 
         now = time.time()
 
-        # ── 4. Detect Index Finger UP gestures ──
-        is_index_up = index_up and not middle_up and ring_down and pinky_down
-
-        # Detect left pinch (thumb tip ↔ index tip) for select/drag
+        # ── 4. Pinch distances ──
         thumb_tip = landmarks[4]
         left_dist = landmark_distance(thumb_tip, index_tip)
         info['left_dist'] = left_dist
-        
-        # Legacy right pinch
+
         middle_tip = landmarks[12]
         right_dist = landmark_distance(thumb_tip, middle_tip)
         info['right_dist'] = right_dist
 
-        if left_dist < PINCH_THRESHOLD:
-            if not self.left_pinching:
-                self.left_pinching = True
-                if now - self.left_click_time > CLICK_COOLDOWN:
-                    pyautogui.click(_pause=False)
-                    self.left_click_time = now
-                    info['left_click'] = True
-        else:
-            self.left_pinching = False
-            self.drag_active = False
+        if context == 'browser':
+            # ════════════════════════════════════════════════
+            #  BROWSER MODE: 3-second pinch hold verification
+            # ════════════════════════════════════════════════
+            STABILITY_TIME = 3.0
 
-        if not is_index_up:
-            self.z_history.clear()
-            
+            # LEFT CLICK
+            if left_dist < PINCH_THRESHOLD:
+                if self.left_pinch_start is None:
+                    self.left_pinch_start = now
+                    self.left_pinch_fired = False
+                elif not self.left_pinch_fired:
+                    elapsed = now - self.left_pinch_start
+                    if elapsed >= STABILITY_TIME:
+                        if now - self.left_click_time > CLICK_COOLDOWN:
+                            pyautogui.click(_pause=False)
+                            self.left_click_time = now
+                            info['left_click'] = True
+                        self.left_pinch_fired = True
+            else:
+                self.left_pinch_start = None
+                self.left_pinch_fired = False
+                if self.drag_active:
+                    pyautogui.mouseUp(button='left', _pause=False)
+                    self.drag_active = False
+
+            # RIGHT CLICK
+            if right_dist < RIGHT_PINCH_THRESHOLD:
+                if self.right_pinch_start is None:
+                    self.right_pinch_start = now
+                    self.right_pinch_fired = False
+                elif not self.right_pinch_fired:
+                    elapsed = now - self.right_pinch_start
+                    if elapsed >= STABILITY_TIME:
+                        if now - self.right_click_time > CLICK_COOLDOWN:
+                            pyautogui.rightClick(_pause=False)
+                            self.right_click_time = now
+                            info['right_click'] = True
+                        self.right_pinch_fired = True
+            else:
+                self.right_pinch_start = None
+                self.right_pinch_fired = False
+
+        else:
+            # ════════════════════════════════════════════════
+            #  NON-BROWSER MODE: Immediate Actions (Instant Click & Drag)
+            # ════════════════════════════════════════════════
+            self.left_pinch_start = None
+            self.left_pinch_fired = False
+            self.right_pinch_start = None
+            self.right_pinch_fired = False
+
+            # Handle immediate left click and drag
+            if left_dist < PINCH_THRESHOLD:
+                self.pinch_hold_frames += 1
+                if not self.left_pinching:
+                    self.left_pinching = True
+            else:
+                if self.left_pinching:
+                    if self.drag_active:
+                        pyautogui.mouseUp(button='left', _pause=False)
+                        self.drag_active = False
+                    else:
+                        # Quick tap -> trigger click immediately on release
+                        if now - self.left_click_time > CLICK_COOLDOWN:
+                            pyautogui.click(_pause=False)
+                            self.left_click_time = now
+                            info['left_click'] = True
+                    self.left_pinching = False
+                    self.pinch_hold_frames = 0
+
+            # If pinch is held long enough, trigger drag
+            if self.left_pinching and self.pinch_hold_frames >= DRAG_ENTRY_FRAMES and not self.drag_active:
+                self.drag_active = True
+                pyautogui.mouseDown(button='left', _pause=False)
+
+            # Handle immediate right click
             if right_dist < RIGHT_PINCH_THRESHOLD:
                 if not self.right_pinching:
                     self.right_pinching = True
@@ -279,47 +357,11 @@ class CursorController:
             else:
                 self.right_pinching = False
 
-            info['dragging'] = self.drag_active
-            if img is not None:
-                self._draw_feedback(img, landmarks, info, left_dist, right_dist)
-            return info
-
-        # If index is UP, check for tilt and tap
-        self.z_history.append(index_tip.z)
-        if len(self.z_history) > 10:
-            self.z_history.pop(0)
-
-        # Tilt threshold
-        tilt_dx = index_tip.x - index_mcp.x
-        tilt_right = tilt_dx > 0.04
-        tilt_left = tilt_dx < -0.04
-        straight = not tilt_right and not tilt_left
-
-        forward_push = False
-        if len(self.z_history) >= 5:
-            # Check if Z decreased (moved forward towards camera)
-            z_drop = self.z_history[0] - self.z_history[-1]
-            if z_drop > 0.025:
-                forward_push = True
-                self.z_history.clear() # reset to avoid multiple triggers
-
-        if forward_push:
-            if tilt_right:
-                if now - self.right_click_time > CLICK_COOLDOWN:
-                    pyautogui.rightClick(_pause=False)
-                    self.right_click_time = now
-                    info['right_click'] = True
-            elif tilt_left:
-                if now - self.left_click_time > CLICK_COOLDOWN:
-                    pyautogui.click(_pause=False)
-                    self.left_click_time = now
-                    info['left_click'] = True
-        
         info['dragging'] = self.drag_active
 
         # Visual Feedback
         if img is not None:
-            self._draw_feedback(img, landmarks, info, 1.0, 1.0)
+            self._draw_feedback(img, landmarks, info, left_dist, right_dist, context)
 
         return info
 
@@ -341,13 +383,20 @@ class CursorController:
         self.z_history.clear()
         self.tap_count = 0
 
+        # Reset 3-second pinch hold trackers
+        self.left_pinch_start = None
+        self.left_pinch_fired = False
+        self.right_pinch_start = None
+        self.right_pinch_fired = False
+
     # ────────────────────────────────────────────────────
     #  VISUAL FEEDBACK (draws on the camera frame)
     # ────────────────────────────────────────────────────
 
-    def _draw_feedback(self, img, landmarks, info, left_dist, right_dist):
+    def _draw_feedback(self, img, landmarks, info, left_dist, right_dist, context='default'):
         """Draw cursor info, pinch indicators, and status on frame."""
         h, w = img.shape[:2]
+        now = time.time()
 
         # ── Draw index fingertip circle ──
         ix = int(landmarks[8].x * w)
@@ -360,11 +409,36 @@ class CursorController:
 
         # Cursor coordinates
         cv2.putText(img, f"Cursor: ({sx}, {sy})", (10, h - 70),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.50, (200, 200, 200), 1, cv2.LINE_AA)
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (200, 200, 200), 2, cv2.LINE_AA)
 
         # Gesture status
         cv2.putText(img, f"Dragging: {'ON' if info.get('dragging') else 'OFF'}", (10, h - 50),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (180, 255, 180), 1, cv2.LINE_AA)
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.50, (180, 255, 180), 2, cv2.LINE_AA)
+
+        # ── Pinch hold progress bar (shows 3-second countdown only in browser) ──
+        pinch_label = None
+        pinch_progress = 0.0
+        stability_time = 3.0 if context == 'browser' else PINCH_STABILITY_TIME
+        if self.left_pinch_start is not None and not self.left_pinch_fired:
+            elapsed = now - self.left_pinch_start
+            pinch_progress = min(elapsed / stability_time, 1.0)
+            pinch_label = "LEFT CLICK"
+        elif self.right_pinch_start is not None and not self.right_pinch_fired:
+            elapsed = now - self.right_pinch_start
+            pinch_progress = min(elapsed / stability_time, 1.0)
+            pinch_label = "RIGHT CLICK"
+
+        if pinch_label and pinch_progress > 0:
+            bar_x1, bar_x2 = w // 2 - 80, w // 2 + 80
+            bar_y1, bar_y2 = h // 2 + 60, h // 2 + 76
+            fill = int(pinch_progress * (bar_x2 - bar_x1))
+            bar_col = (0, 200, 255) if pinch_progress < 1.0 else (0, 255, 0)
+            cv2.rectangle(img, (bar_x1, bar_y1), (bar_x2, bar_y2), (40, 40, 40), -1)
+            cv2.rectangle(img, (bar_x1, bar_y1), (bar_x1 + fill, bar_y2), bar_col, -1)
+            cv2.rectangle(img, (bar_x1, bar_y1), (bar_x2, bar_y2), (100, 100, 100), 1)
+            pct_text = f"{pinch_label} {int(pinch_progress * 100)}%"
+            cv2.putText(img, pct_text, (bar_x1, bar_y1 - 6),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, bar_col, 2, cv2.LINE_AA)
 
         # ── Flash "CLICK" / "RIGHT CLICK" / "DRAGGING" ──
         if info.get('left_click'):
@@ -381,7 +455,7 @@ class CursorController:
 
         # ── "CURSOR MODE" badge ──
         badge = "  CURSOR MODE  "
-        (bw, bh), _ = cv2.getTextSize(badge, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 1)
+        (bw, bh), _ = cv2.getTextSize(badge, cv2.FONT_HERSHEY_SIMPLEX, 0.65, 2)
         bx = w - bw - 14
         by = h - 70
         cv2.rectangle(img, (bx - 4, by - bh - 4), (bx + bw + 4, by + 6),
@@ -389,7 +463,7 @@ class CursorController:
         cv2.rectangle(img, (bx - 4, by - bh - 4), (bx + bw + 4, by + 6),
                       (0, 200, 255), 1)
         cv2.putText(img, badge, (bx, by),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1, cv2.LINE_AA)
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 255), 2, cv2.LINE_AA)
 
         # ── Mapping region rectangle (shows usable area on camera) ──
         rx1 = int(MAP_X_MIN * w)

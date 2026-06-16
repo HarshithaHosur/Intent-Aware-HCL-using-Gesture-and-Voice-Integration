@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>INTENT_OS Dashboard</title>
     {% load static %}
-    <link rel="stylesheet" href="{% static 'css/styles.css' %}?v=3.0">
+    <link rel="stylesheet" href="{% static 'css/styles.css' %}?v=4.0">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
 </head>
 <body>
@@ -52,7 +52,7 @@
         <main class="main-content">
             <header class="top-bar">
                 <div class="top-nav-left">
-                    <h2>AETHER_CORE</h2>
+                    <h2>INTENT_OS</h2>
                     <nav class="top-links">
                         <a href="{% url 'live_nodes' %}" class="{% if request.resolver_match.url_name == 'live_nodes' %}active{% endif %}">Live Nodes</a>
                         <a href="#" class="{% if request.resolver_match.url_name == 'neural_link' %}active{% endif %}">Neural Link</a>
@@ -62,6 +62,24 @@
                 <div class="top-nav-right">
                     <div class="system-status">
                         <span class="dot animated-pulse"></span> System Online
+                    </div>
+                    <!-- Users Panel Button -->
+                    <div class="users-panel-wrapper" style="position: relative;">
+                        <button class="users-dropdown-trigger" id="users-toggle-btn" title="System Users" onclick="toggleUsersPanel()">
+                            <span class="users-btn-icon">👥</span>
+                            <span class="users-badge" id="users-badge">0</span>
+                            <span class="arrow-icon">▼</span>
+                        </button>
+                        <!-- Users Dropdown Panel -->
+                        <div class="users-dropdown" id="users-dropdown">
+                            <div class="users-dropdown-header">
+                                <h4>👥 SYSTEM OPERATORS</h4>
+                                <span class="users-count-label" id="users-count-label">0 users</span>
+                            </div>
+                            <div class="users-dropdown-list" id="users-list">
+                                <div class="users-loading">Scanning registry...</div>
+                            </div>
+                        </div>
                     </div>
                     <button class="btn-icon">🔔</button>
                     <button class="btn-icon">📊</button>
@@ -77,6 +95,97 @@
     </div>
     
     <script src="{% static 'js/app.js' %}"></script>
+    <script>
+        // Users Panel Logic
+        let usersPanelOpen = false;
+        let cachedUsersData = null;
+
+        function toggleUsersPanel() {
+            const btn = document.getElementById('users-toggle-btn');
+            const dropdown = document.getElementById('users-dropdown');
+            usersPanelOpen = !usersPanelOpen;
+            if (usersPanelOpen) {
+                btn.classList.add('active');
+                dropdown.classList.add('active');
+                fetchUsers();
+            } else {
+                btn.classList.remove('active');
+                dropdown.classList.remove('active');
+            }
+        }
+
+        async function renderUsersList(data) {
+            const badge = document.getElementById('users-badge');
+            const countLabel = document.getElementById('users-count-label');
+            const list = document.getElementById('users-list');
+
+            badge.textContent = data.total;
+            countLabel.textContent = data.total + (data.total === 1 ? ' operator' : ' operators');
+
+            if (data.users.length === 0) {
+                list.innerHTML = '<div class="users-loading">No operators registered</div>';
+                return;
+            }
+
+            list.innerHTML = data.users.map(u => `
+                <div class="user-card">
+                    <div class="user-card-avatar">${u.username.charAt(0).toUpperCase()}</div>
+                    <div class="user-card-info">
+                        <div class="user-card-name">${u.username}</div>
+                        <div class="user-card-email">${u.email || 'No email'}</div>
+                        <div class="user-card-date">Joined ${u.date_joined}</div>
+                    </div>
+                    <div class="user-card-status ${u.face_registered ? 'face-ok' : 'face-missing'}" title="${u.face_registered ? 'Face registered' : 'Face not registered'}">
+                        <span class="status-dot"></span>
+                        <span class="status-label">${u.face_registered ? 'VERIFIED' : 'NO FACE'}</span>
+                    </div>
+                </div>
+            `).join('');
+        }
+
+        async function fetchUsers() {
+            // Render cached data immediately to eliminate loading lag
+            if (cachedUsersData) {
+                renderUsersList(cachedUsersData);
+            }
+
+            try {
+                const response = await fetch('/api/users/');
+                const data = await response.json();
+                if (data.status === 'success') {
+                    cachedUsersData = data;
+                    renderUsersList(data);
+                } else {
+                    document.getElementById('users-list').innerHTML = `<div class="users-loading">Error: ${data.message || 'Unknown error'}</div>`;
+                }
+            } catch (err) {
+                console.error('Error fetching users:', err);
+                if (!cachedUsersData) {
+                    document.getElementById('users-list').innerHTML = '<div class="users-loading">Error loading operators</div>';
+                }
+            }
+        }
+
+        // Close panel when clicking outside
+        document.addEventListener('click', function(e) {
+            const wrapper = document.querySelector('.users-panel-wrapper');
+            if (wrapper && !wrapper.contains(e.target) && usersPanelOpen) {
+                usersPanelOpen = false;
+                document.getElementById('users-dropdown').classList.remove('active');
+                document.getElementById('users-toggle-btn').classList.remove('active');
+            }
+        });
+
+        // Load user count and cache data on page load
+        document.addEventListener('DOMContentLoaded', function() {
+            fetch('/api/users/').then(r => r.json()).then(data => {
+                if (data.status === 'success') {
+                    cachedUsersData = data;
+                    document.getElementById('users-badge').textContent = data.total;
+                }
+            }).catch(() => {});
+        });
+    </script>
     {% block scripts %}{% endblock %}
 </body>
 </html>

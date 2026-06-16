@@ -31,9 +31,9 @@ ALLOWED_HOSTS = []
 # Application definition
 
 INSTALLED_APPS = [
-    'django.contrib.admin',
-    'django.contrib.auth',
-    'django.contrib.contenttypes',
+    'dashboard.mongo_apps.MongoAdminConfig',
+    'dashboard.mongo_apps.MongoAuthConfig',
+    'dashboard.mongo_apps.MongoContentTypesConfig',
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
@@ -48,6 +48,7 @@ MIDDLEWARE = [
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
+    'dashboard.middleware.FaceAuthMiddleware',
 ]
 
 ROOT_URLCONF = 'intent_os.urls'
@@ -75,8 +76,9 @@ WSGI_APPLICATION = 'intent_os.wsgi.application'
 
 DATABASES = {
     'default': {
-        'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / 'db.sqlite3',
+        'ENGINE': 'django_mongodb_backend',
+        'NAME': 'intent_os',
+        'HOST': 'mongodb://localhost:27017/',
     }
 }
 
@@ -119,7 +121,10 @@ USE_TZ = True
 STATIC_URL = 'static/'
 STATICFILES_DIRS = [BASE_DIR / 'static']
 
-DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
+DEFAULT_AUTO_FIELD = 'django_mongodb_backend.fields.ObjectIdAutoField'
 
 LOGIN_REDIRECT_URL = '/'
 LOGOUT_REDIRECT_URL = '/accounts/login/'
+
+# Ensure session dies when browser closes — forces fresh login each time
+SESSION_EXPIRE_AT_BROWSER_CLOSE = True

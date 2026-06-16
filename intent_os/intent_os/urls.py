@@ -7,6 +7,9 @@ urlpatterns = [
     path('accounts/', include('django.contrib.auth.urls')),
     path('signup/', views.signup, name='signup'),
     path('logout/', views.custom_logout, name='custom_logout'),
+    path('face-register/', views.face_register, name='face_register'),
+    path('face-verify/', views.face_verify, name='face_verify'),
+    path('api/face-status/', views.api_face_status, name='api_face_status'),
     path('', views.dashboard_home, name='dashboard_home'),
     path('gesture-settings/', views.gesture_settings, name='gesture_settings'),
     path('voice-settings/', views.voice_settings, name='voice_settings'),
@@ -26,4 +29,5 @@ urlpatterns = [
     path('api/system-logs/', views.api_system_logs, name='api_system_logs'),
     path('api/recent-commands/', views.api_recent_commands, name='api_recent_commands'),
     path('api/system-status/', views.api_system_status, name='api_system_status'),
+    path('api/users/', views.api_registered_users, name='api_registered_users'),
 ]

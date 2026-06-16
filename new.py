@@ -53,27 +53,32 @@ pyautogui.PAUSE = 0.02
 
 # ============================================================
 #                     CONFIGURATION
-ACTIVATION_TIME = 0.5
+ACTIVATION_TIME = 2.0
 STABILITY_THRESHOLD = 80
 INACTIVITY_TIMEOUT = 45
 
-import face_recognition
+try:
+    import face_recognition
+    FACE_RECOGNITION_AVAILABLE = True
+except ImportError:
+    FACE_RECOGNITION_AVAILABLE = False
 
 # Add grace periods for activation
 ACTIVATION_DROP_TOLERANCE = 15 # frames
 
 
-SWIPE_THRESHOLD = 50
-SWIPE_VERTICAL_LIMIT = 80
+SWIPE_THRESHOLD = 30
+SWIPE_VERTICAL_LIMIT = 120
 GESTURE_COOLDOWN = 0.5
+SWIPE_COOLDOWN = 1.5          # Seconds to block after a swipe so only 1 tab switches
 SWIPE_FRAME_WINDOW = 8
 
 CAMERA_WIDTH = 1280
 CAMERA_HEIGHT = 720
 CAMERA_FPS = 30
 
-VOICE_LISTEN_TIMEOUT = 2
-VOICE_PHRASE_LIMIT = 4
+VOICE_LISTEN_TIMEOUT = 3
+VOICE_PHRASE_LIMIT = 6
 TTS_RATE = 175
 TTS_VOLUME = 0.9
 
@@ -96,7 +101,7 @@ STATE_FACE_REGISTRATION = "FACE_REGISTRATION"
 mp_hands = mp.solutions.hands
 hands = mp_hands.Hands(
     static_image_mode=False,
-    max_num_hands=1,
+    max_num_hands=2,
     min_detection_confidence=0.7,
     min_tracking_confidence=0.6
 )
@@ -125,11 +130,11 @@ engine.setProperty('volume', TTS_VOLUME)
 # ============================================================
 
 recognizer = sr.Recognizer()
-# HYPER-FAST voice capturing -> restored to original speed
-recognizer.pause_threshold = 0.50     # Wait 0.5s of silence before cutting off
-recognizer.non_speaking_duration = 0.30 # Keep audio buffer minimal for fast response
-recognizer.dynamic_energy_threshold = False
-recognizer.energy_threshold = 300      # Higher threshold to ignore background noise
+# Tuned for high accuracy: give the speaker more time before cutting off
+recognizer.pause_threshold = 0.8      # Wait 0.8s of silence before cutting off
+recognizer.non_speaking_duration = 0.4 # Slightly larger buffer captures full words
+recognizer.dynamic_energy_threshold = True  # Auto-adapt to ambient noise
+recognizer.energy_threshold = 250      # Lower threshold to catch softer speech
 
 mic = sr.Microphone()
 
@@ -182,23 +187,23 @@ def detect_context():
 GESTURE_ACTION_MAP = {
     'swipe_right': {
         'powerpoint':    ('key', 'right',              'Next Slide'),
-        'browser':       ('hotkey', ['alt', 'right'],   'Forward'),
+        'browser':       ('hotkey', ['ctrl', 'tab'],    'Next Tab'),
         'spotify':       ('hotkey', ['ctrl', 'right'],  'Next Song'),
         'vlc':           ('hotkey', ['shift', 'right'], 'Skip Forward'),
         'code_editor':   ('hotkey', ['ctrl', 'pagedown'], 'Next Tab'),
         'file_explorer': ('hotkey', ['alt', 'right'],   'Forward'),
         'text_editor':   ('hotkey', ['ctrl', 'right'],  'Next Word'),
-        'default':       ('key', 'right',              'Right Arrow'),
+        'default':       ('hotkey', ['ctrl', 'tab'],    'Next Tab'),
     },
     'swipe_left': {
         'powerpoint':    ('key', 'left',               'Previous Slide'),
-        'browser':       ('hotkey', ['alt', 'left'],    'Back'),
+        'browser':       ('hotkey', ['ctrl', 'shift', 'tab'], 'Previous Tab'),
         'spotify':       ('hotkey', ['ctrl', 'left'],   'Previous Song'),
         'vlc':           ('hotkey', ['shift', 'left'],  'Skip Backward'),
         'code_editor':   ('hotkey', ['ctrl', 'pageup'], 'Previous Tab'),
         'file_explorer': ('hotkey', ['alt', 'left'],    'Back'),
         'text_editor':   ('hotkey', ['ctrl', 'left'],   'Previous Word'),
-        'default':       ('key', 'left',               'Left Arrow'),
+        'default':       ('hotkey', ['ctrl', 'shift', 'tab'], 'Previous Tab'),
     },
     'fist': {
         'powerpoint':    ('key', 'escape',             'Exit Slideshow'),
@@ -745,12 +750,12 @@ def execute_vision_command(text):
 Current Screen Resolution: {res_w}x{res_h}
 User Request: "{text}"
 Look at the attached screen image.
-- If they want to open a video or click a button, find the [X, Y] center coordinates.
-- Format your response as raw Python: `pyautogui.click(X, Y)`
-- If it's a video on YouTube, find the thumbnail center.
-- Use `pyautogui.moveTo(X, Y)` before clicking for smoothness.
-- If you can't see the target, return NONE.
-Return ONLY raw Python code.
+- Your primary job is to locate the exact item requested by the user ON THE SCREEN. This could be a file, folder, app icon on the desktop/taskbar, a close button (X), a chat in a messaging window (like WhatsApp), a tab, a link, a video player button, or any other visible UI element.
+- If the user wants to OPEN something (like a desktop icon, file, or folder), find its center coordinates (X, Y) and use: `pyautogui.moveTo(X, Y); pyautogui.doubleClick()`
+- If the user wants to CLOSE something, find the (X) close button or the tab's close button, and use: `pyautogui.moveTo(X, Y); pyautogui.click()`
+- For any other button, chat name, contact, text field, link, or tab, use: `pyautogui.moveTo(X, Y); pyautogui.click()`
+- If you confidently see the target, return ONLY the raw Python code to click/double-click it. Do NOT wrap it in markdown blocks or backticks.
+- If you absolutely CANNOT locate the requested target on the screen visually, return exactly the word: NONE
 """
         # Note: Gemini 1.5 Flash supports multimodal image input
         response = gemini_model.generate_content([
@@ -778,6 +783,7 @@ class GestureRecognizer:
     def __init__(self):
         self.wrist_history = []
         self.last_gesture_time = 0
+        self.last_swipe_time = 0      # Dedicated swipe cooldown timer
         self.frame_count = 0
         self.current_static_gesture = None
         self.static_gesture_start_time = 0
@@ -786,12 +792,18 @@ class GestureRecognizer:
         tips = [4, 8, 12, 16, 20]
         pips = [2, 5, 9, 13, 17]
         states = []
-        if handedness == 'Right':
-            states.append(landmarks[tips[0]].x < landmarks[pips[0]].x)
-        else:
-            states.append(landmarks[tips[0]].x > landmarks[pips[0]].x)
+        
+        # Thumb: extended if tip is further from pinky base (17) than the IP joint (3)
+        d_thumb_tip = math.hypot(landmarks[4].x - landmarks[17].x, landmarks[4].y - landmarks[17].y)
+        d_thumb_ip = math.hypot(landmarks[3].x - landmarks[17].x, landmarks[3].y - landmarks[17].y)
+        states.append(d_thumb_tip > d_thumb_ip)
+        
+        # Other fingers: extended if tip is further from wrist (0) than the PIP joint
         for i in range(1, 5):
-            states.append(landmarks[tips[i]].y < landmarks[pips[i]].y)
+            d_tip = math.hypot(landmarks[tips[i]].x - landmarks[0].x, landmarks[tips[i]].y - landmarks[0].y)
+            d_pip = math.hypot(landmarks[pips[i]].x - landmarks[0].x, landmarks[pips[i]].y - landmarks[0].y)
+            states.append(d_tip > d_pip)
+            
         return states
 
     def detect_static_gesture(self, landmarks, handedness='Right'):
@@ -804,6 +816,10 @@ class GestureRecognizer:
         # --- PALM: All fingers open ---
         if all_open:
             return 'palm'
+
+        # --- PEACE SIGN: Index and Middle open, Ring and Pinky closed ---
+        if fingers[1] and fingers[2] and not fingers[3] and not fingers[4]:
+            return 'peace'
 
         # --- THUMBS UP / DOWN: Check BEFORE fist to prevent misdetection ---
         # Thumb must be clearly extended while all 4 other fingers are curled
@@ -847,32 +863,46 @@ class GestureRecognizer:
             if min_dist < palm_length * 0.55:
                 return 'fist'
 
+        # --- INDEX CURSOR: Only index finger up, other 3 closed ---
+        if is_index_pointing(landmarks, handedness):
+            return 'index_cursor'
+
         return None
 
+
     def detect_swipe(self, landmarks, handedness, frame_width):
-        fingers = self.get_finger_states(landmarks, handedness)
-        if not all(fingers):
-            self.wrist_history.clear()
+        current_time = time.time()
+
+        # ── Swipe cooldown: block rapid-fire swipes so 1 swipe = 1 tab ──
+        if current_time - self.last_swipe_time < SWIPE_COOLDOWN:
+            self.wrist_history.clear()   # discard motion during cooldown
             return None
-            
+
         wrist = landmarks[0]
         wrist_x = int(wrist.x * frame_width)
         wrist_y = int(wrist.y * CAMERA_HEIGHT)
-        self.wrist_history.append((wrist_x, wrist_y, time.time()))
-        if len(self.wrist_history) > SWIPE_FRAME_WINDOW:
-            self.wrist_history.pop(0)
-        if len(self.wrist_history) < SWIPE_FRAME_WINDOW:
+        self.wrist_history.append((wrist_x, wrist_y, current_time))
+        
+        # Keep history up to 0.5 seconds for responsive swiping
+        self.wrist_history = [pos for pos in self.wrist_history if current_time - pos[2] < 0.5]
+        
+        if len(self.wrist_history) < 3:
             return None
+            
         start_x, start_y, start_t = self.wrist_history[0]
         end_x, end_y, end_t = self.wrist_history[-1]
+        
         dx = end_x - start_x
         dy = abs(end_y - start_y)
-        time_diff = end_t - start_t
-        if time_diff > 0.6:
-            return None
-        if abs(dx) > SWIPE_THRESHOLD and dy < SWIPE_VERTICAL_LIMIT:
-            self.wrist_history.clear()
-            return 'swipe_right' if dx > 0 else 'swipe_left'
+        
+        # Trigger once when distance threshold is reached
+        if abs(dx) > 60 and dy < 150:
+            fingers = self.get_finger_states(landmarks, handedness)
+            # Require at least 3 fingers open to trigger swipe
+            if sum(fingers[1:]) >= 3:
+                self.wrist_history.clear()
+                self.last_swipe_time = current_time   # arm the cooldown
+                return 'swipe_right' if dx > 0 else 'swipe_left'
         return None
 
     def recognize(self, landmarks, handedness, frame_width):
@@ -917,6 +947,69 @@ def execute_gesture_action(gesture_name, context):
 
 
 # ============================================================
+#              STABLE GESTURE EXECUTION
+# ============================================================
+
+def execute_stable_gesture(gesture_name, system_state, context, gesture_recognizer):
+    curr_time = time.time()
+    
+    # 1. Update last interaction time
+    system_state['last_interaction'] = curr_time
+    
+    # 2. Handle double hand scroll activation / deactivation
+    if gesture_name == 'double_palm':
+        system_state['scroll_mode'] = True
+        system_state['scroll_speed'] = 0  # Stop any active continuous scroll speed
+        system_state['last_action'] = "🤚🤚 Double Palm -> Scroll Mode ON"
+        system_state['action_display_time'] = curr_time
+        speak("Scroll mode enabled")
+        log_event(event_type="system", command="Scroll Mode ON", action="Double Palm Detected", status="completed")
+        print("[SCROLL] Scroll Mode Activated via Double Palm")
+        return
+        
+    if gesture_name == 'double_peace':
+        system_state['scroll_mode'] = False
+        system_state['scroll_speed'] = 0
+        system_state['last_action'] = "✌️✌️ Double Peace -> Scroll Mode OFF"
+        system_state['action_display_time'] = curr_time
+        speak("Scroll mode disabled")
+        log_event(event_type="system", command="Scroll Mode OFF", action="Double Peace Detected", status="completed")
+        print("[SCROLL] Scroll Mode Deactivated via Double Peace")
+        return
+
+    # 3. If scroll_mode is active, we do not allow any other static gestures
+    if system_state.get('scroll_mode', False):
+        return
+
+    # 4. Handle normal single hand static gestures
+    if gesture_name == 'fist':
+        system_state['scroll_speed'] = -10
+        action_desc = "Scroll Down Slowly"
+        action_text = f"✋ Fist → {action_desc} [{context}]"
+        system_state['last_action'] = action_text
+        system_state['action_display_time'] = curr_time
+        speak(action_desc)
+        log_event(event_type="gesture", command="Fist", action="Scroll Down Slowly", status="completed")
+    elif gesture_name == 'palm':
+        system_state['scroll_speed'] = 0
+        action_desc = "Stop Scrolling"
+        action_text = f"✋ Palm → {action_desc} [{context}]"
+        system_state['last_action'] = action_text
+        system_state['action_display_time'] = curr_time
+        speak(action_desc)
+        log_event(event_type="gesture", command="Palm", action="Stop Scrolling", status="completed")
+    else:
+        action_desc = execute_gesture_action(gesture_name, context)
+        if action_desc:
+            action_text = f"✋ {gesture_name.replace('_', ' ').title()} → {action_desc} [{context}]"
+            system_state['last_action'] = action_text
+            system_state['action_display_time'] = curr_time
+            print(f"[GESTURE] {action_text}")
+            speak(action_desc)
+            log_event(event_type="gesture", command=gesture_name.replace('_', ' ').title(), action=action_desc, status="completed")
+
+
+# ============================================================
 #   🆕 ENHANCED VOICE COMMAND EXECUTOR WITH AI
 # ============================================================
 
@@ -955,21 +1048,87 @@ def execute_voice_command(text):
             return f"Searching: {query}"
         return None
     
-    # ── Dynamic Folder Searching via os.walk ──
-    if 'open ' in text and (' folder' in text or ' directory' in text):
-        raw_name = text.replace('open', '').replace('my', '').replace('folder', '').replace('the', '').replace('directory', '').strip()
+    # ── Dynamic File / Folder Searching (Desktop, Documents, Downloads, D:\) ──
+    if 'open ' in text:
+        # Strip noise words to get the target name
+        raw_name = text
+        for word in ['open', 'the', 'my', 'a', 'folder', 'directory', 'file', 'please']:
+            raw_name = raw_name.replace(word, '')
+        raw_name = raw_name.strip()
         if raw_name:
-            search_paths = [os.path.expanduser('~'), "D:\\"]
+            home = os.path.expanduser('~')
+            search_paths = [
+                os.path.join(home, 'Desktop'),
+                os.path.join(home, 'Documents'),
+                os.path.join(home, 'Downloads'),
+                os.path.join(home, 'OneDrive', 'Desktop'),   # OneDrive-synced Desktop
+                os.path.join(home, 'OneDrive', 'Documents'),
+                home,
+                "D:\\",
+            ]
+            SKIP_DIRS = {'appdata', 'windows', 'program files', 'program files (x86)',
+                         'programdata', '$recycle.bin', 'system volume information',
+                         '.git', 'node_modules', '__pycache__', '.vscode'}
+            MAX_DEPTH = 3
+            best_match_path = None
+            best_match_score = 0
             for base_path in search_paths:
-                if not os.path.exists(base_path): continue
-                for root, dirs, files in os.walk(base_path):
-                    dirs[:] = [d for d in dirs if not d.startswith('.') and d.lower() not in ['appdata', 'windows', 'program files']]
-                    for d in dirs:
-                        if raw_name in d.lower():
-                            os.startfile(os.path.join(root, d))
-                            return f"Opened folder: {d}"
-                    if root.count(os.sep) - base_path.count(os.sep) > 1:
-                        del dirs[:]
+                if not os.path.exists(base_path):
+                    continue
+                for root, dirs, files_list in os.walk(base_path):
+                    depth = root.replace(base_path, '').count(os.sep)
+                    if depth >= MAX_DEPTH:
+                        dirs.clear()
+                        continue
+                    dirs[:] = [d for d in dirs if not d.startswith('.') and d.lower() not in SKIP_DIRS]
+                    # Search BOTH files and folders
+                    for name in dirs + files_list:
+                        name_lower = name.lower()
+                        name_no_ext = os.path.splitext(name_lower)[0]
+                        # Exact match (best)
+                        if name_no_ext == raw_name or name_lower == raw_name:
+                            best_match_path = os.path.join(root, name)
+                            best_match_score = 100
+                            break
+                        # Substring match
+                        if raw_name in name_lower and best_match_score < 80:
+                            best_match_path = os.path.join(root, name)
+                            best_match_score = 80
+                        # Fuzzy match
+                        elif best_match_score < 60:
+                            ratio = fuzz.partial_ratio(raw_name, name_lower)
+                            if ratio > 75 and ratio > best_match_score:
+                                best_match_path = os.path.join(root, name)
+                                best_match_score = ratio
+                    if best_match_score >= 100:
+                        break
+                if best_match_score >= 100:
+                    break
+            if best_match_path:
+                try:
+                    os.startfile(best_match_path)
+                    return f"Opened: {os.path.basename(best_match_path)}"
+                except Exception as e:
+                    print(f"[File Open Error] {e}")
+    
+    # ── Close file / app on screen by name ──
+    if 'close ' in text:
+        target = text.replace('close', '').replace('the', '').replace('my', '').strip()
+        if target:
+            # Try to find the window by title and close it
+            try:
+                import pygetwindow as gw
+                all_windows = gw.getAllWindows()
+                for win in all_windows:
+                    if target in win.title.lower() and win.title.strip():
+                        win.close()
+                        return f"Closed: {win.title}"
+            except Exception:
+                pass
+            # Fallback: use vision to click the X button
+            success = execute_vision_command(f"close {target}")
+            if success:
+                return f"Closed {target} via screen"
     
     # --- Continuous Scroll Logic ---
     if 'scroll down' in text:
@@ -985,11 +1144,19 @@ def execute_voice_command(text):
         system_state_global['scroll_speed'] = 0
         return "Scrolling stopped"
         
+    # ── Check exact hardcoded commands first (instant and 100% reliable) ──
+    if text in VOICE_COMMANDS:
+        VOICE_COMMANDS[text]()
+        return f"Executed: {text}"
+
     # --- Vision Logic (Contextual Screen Actions) ---
     visual_keywords = ['this video', 'play button', 'click this', 'open this', 'on screen']
-    if any(kw in text for kw in visual_keywords):
+    visual_verbs = ['click', 'open', 'close', 'select', 'press', 'show', 'start', 'run', 'play', 'go to', 'find']
+    if any(verb in text for verb in visual_verbs) or any(kw in text for kw in visual_keywords):
+        print(f"[Vision Check] Scanning screen for visual target matching '{text}'")
         success = execute_vision_command(text)
-        if success: return "Executing visual action"
+        if success:
+            return "Executed screen-aware action"
     
     # ── 🧠 LEVEL 3: Try AI Intent Classification ──
     is_hardcoded = any(text == cmd or text.startswith(cmd) for cmd in VOICE_COMMANDS.keys())
@@ -1303,7 +1470,8 @@ def _rect_alpha(img, pt1, pt2, color, alpha):
 
 
 def draw_ui(img, state, fps, progress=0, context="", last_action="",
-            action_display_time=0, inactivity_remaining=0, detected_gesture=""):
+            action_display_time=0, inactivity_remaining=0, detected_gesture="", scroll_mode=False,
+            gesture_hold_progress=0, gesture_hold_name="", cursor_active=False):
     h, w = img.shape[:2]
 
     if state == STATE_ACTIVE:
@@ -1331,32 +1499,32 @@ def draw_ui(img, state, fps, progress=0, context="", last_action="",
     _rect_alpha(img, (0, h - 26), (w, h), _C['strip_bg'], 0.72)
     cv2.line(img, (0, h - 26), (w, h - 26), (55, 55, 55), 1)
 
-    cv2.putText(img, lbl_txt, (16, 42),
-                cv2.FONT_HERSHEY_DUPLEX, 1.05, lbl_col, 2, cv2.LINE_AA)
+    cv2.putText(img, lbl_txt, (20, 45),
+                cv2.FONT_HERSHEY_DUPLEX, 1.20, lbl_col, 2, cv2.LINE_AA)
 
     if state == STATE_PASSIVE:
         hint = "SHOW  HAND   or   SAY  'ACTIVATE'"
-        (tw, _), _ = cv2.getTextSize(hint, cv2.FONT_HERSHEY_SIMPLEX, 0.60, 1)
+        (tw, _), _ = cv2.getTextSize(hint, cv2.FONT_HERSHEY_SIMPLEX, 0.65, 2)
         cv2.putText(img, hint, ((w - tw) // 2, 63),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.60, _C['t_white'], 1, cv2.LINE_AA)
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.65, _C['t_white'], 2, cv2.LINE_AA)
 
     elif state == STATE_LOGIN_WAITING:
         hint = "PLEASE LOGIN VIA DASHBOARD"
-        (tw, _), _ = cv2.getTextSize(hint, cv2.FONT_HERSHEY_SIMPLEX, 0.60, 1)
+        (tw, _), _ = cv2.getTextSize(hint, cv2.FONT_HERSHEY_SIMPLEX, 0.65, 2)
         cv2.putText(img, hint, ((w - tw) // 2, 63),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.60, _C['t_white'], 1, cv2.LINE_AA)
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.65, _C['t_white'], 2, cv2.LINE_AA)
 
     elif state == STATE_FACE_VERIFICATION:
         hint = "LOOK AT CAMERA TO VERIFY"
-        (tw, _), _ = cv2.getTextSize(hint, cv2.FONT_HERSHEY_SIMPLEX, 0.60, 1)
+        (tw, _), _ = cv2.getTextSize(hint, cv2.FONT_HERSHEY_SIMPLEX, 0.65, 2)
         cv2.putText(img, hint, ((w - tw) // 2, 63),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.60, _C['t_white'], 1, cv2.LINE_AA)
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.65, _C['t_white'], 2, cv2.LINE_AA)
 
     elif state == STATE_FACE_REGISTRATION:
         hint = "LOOK AT CAMERA TO REGISTER"
-        (tw, _), _ = cv2.getTextSize(hint, cv2.FONT_HERSHEY_SIMPLEX, 0.60, 1)
+        (tw, _), _ = cv2.getTextSize(hint, cv2.FONT_HERSHEY_SIMPLEX, 0.65, 2)
         cv2.putText(img, hint, ((w - tw) // 2, 63),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.60, _C['t_white'], 1, cv2.LINE_AA)
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.65, _C['t_white'], 2, cv2.LINE_AA)
 
     elif state == STATE_ACTIVATING:
         bx1, bx2 = 16, w - 16
@@ -1366,54 +1534,82 @@ def draw_ui(img, state, fps, progress=0, context="", last_action="",
         cv2.rectangle(img, (bx1, by1), (bx1 + fill, by2), _C['t_activating'], -1)
         pct = f"{int(progress * 100)}%"
         cv2.putText(img, pct, (bx2 + 4, by2 - 1),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.46, _C['t_activating'], 1, cv2.LINE_AA)
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.50, _C['t_activating'], 2, cv2.LINE_AA)
         cv2.putText(img, "Hold your hand steady...", (bx1, by2 + 20),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.50, _C['t_grey'], 1, cv2.LINE_AA)
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, _C['t_grey'], 2, cv2.LINE_AA)
 
     else:
+        if scroll_mode:
+            badge = "  SCROLL MODE ON  "
+            (bw, bh), _ = cv2.getTextSize(badge, cv2.FONT_HERSHEY_SIMPLEX, 0.65, 2)
+            bx = (w - bw) // 2
+            by = HEADER_H + 54
+            _rect_alpha(img, (bx - 8, by - bh - 8), (bx + bw + 8, by + 8), (0, 100, 220), 0.80)
+            cv2.rectangle(img, (bx - 8, by - bh - 8), (bx + bw + 8, by + 8), (0, 165, 255), 1)
+            cv2.putText(img, badge, (bx, by), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 255), 2, cv2.LINE_AA)
+            
+            instr = "Move hands up/down to scroll  |  Peace (✌️✌️) to Exit"
+            (iw, ih), _ = cv2.getTextSize(instr, cv2.FONT_HERSHEY_SIMPLEX, 0.50, 2)
+            cv2.putText(img, instr, ((w - iw) // 2, by + 30), cv2.FONT_HERSHEY_SIMPLEX, 0.50, (220, 220, 220), 2, cv2.LINE_AA)
+
+        # ── Gesture Hold Progress Bar (3-second countdown) ──
+        if gesture_hold_progress > 0 and gesture_hold_name:
+            gbar_x1, gbar_x2 = 16, w // 2 - 16
+            gbar_y1, gbar_y2 = HEADER_H + 32, HEADER_H + 46
+            gfill = int(gesture_hold_progress * (gbar_x2 - gbar_x1))
+            gcol = (0, 200, 255) if gesture_hold_progress < 1.0 else (0, 255, 0)
+            cv2.rectangle(img, (gbar_x1, gbar_y1), (gbar_x2, gbar_y2), _C['bar_bg'], -1)
+            cv2.rectangle(img, (gbar_x1, gbar_y1), (gbar_x1 + gfill, gbar_y2), gcol, -1)
+            cv2.rectangle(img, (gbar_x1, gbar_y1), (gbar_x2, gbar_y2), (80, 80, 80), 1)
+            gtxt = f"HOLD {gesture_hold_name.upper()} {int(gesture_hold_progress * 100)}%"
+            cv2.putText(img, gtxt, (gbar_x1, gbar_y1 - 5),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.50, gcol, 2, cv2.LINE_AA)
+
         if context:
             ctx = f"[ {context.upper()} ]"
-            (cw, _), _ = cv2.getTextSize(ctx, cv2.FONT_HERSHEY_SIMPLEX, 0.56, 1)
+            (cw, _), _ = cv2.getTextSize(ctx, cv2.FONT_HERSHEY_SIMPLEX, 0.65, 2)
             cv2.putText(img, ctx, (w - cw - 14, 42),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.56, _C['t_cyan'], 1, cv2.LINE_AA)
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.65, _C['t_cyan'], 2, cv2.LINE_AA)
 
-        bx1, bx2 = 16, w - 16
-        by1, by2 = HEADER_H + 6, HEADER_H + 18
-        ratio = max(inactivity_remaining / INACTIVITY_TIMEOUT, 0)
-        fill = int(ratio * (bx2 - bx1))
-        bar_col = _C['bar_ok'] if ratio > 0.5 else _C['bar_warn'] if ratio > 0.2 else _C['bar_crit']
-        cv2.rectangle(img, (bx1, by1), (bx2, by2), _C['bar_bg'], -1)
-        cv2.rectangle(img, (bx1, by1), (bx1 + fill, by2), bar_col, -1)
-        cv2.putText(img, f"timeout  {int(inactivity_remaining)}s", (bx1, by2 + 17),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.43, bar_col, 1, cv2.LINE_AA)
+        # Draw the inactivity timeout bar only if cursor is not active (user doesn't want it when cursor mode is active)
+        if not cursor_active:
+            bx1, bx2 = 16, w - 16
+            by1, by2 = HEADER_H + 6, HEADER_H + 18
+            ratio = max(inactivity_remaining / INACTIVITY_TIMEOUT, 0)
+            fill = int(ratio * (bx2 - bx1))
+            bar_col = _C['bar_ok'] if ratio > 0.5 else _C['bar_warn'] if ratio > 0.2 else _C['bar_crit']
+            cv2.rectangle(img, (bx1, by1), (bx2, by2), _C['bar_bg'], -1)
+            cv2.rectangle(img, (bx1, by1), (bx1 + fill, by2), bar_col, -1)
+            cv2.putText(img, f"timeout  {int(inactivity_remaining)}s", (bx1, by2 + 17),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.50, bar_col, 2, cv2.LINE_AA)
 
         if detected_gesture:
             badge = f"  {detected_gesture.replace('_', ' ').upper()}  "
-            (bw, bh), _ = cv2.getTextSize(badge, cv2.FONT_HERSHEY_SIMPLEX, 0.58, 1)
+            (bw, bh), _ = cv2.getTextSize(badge, cv2.FONT_HERSHEY_SIMPLEX, 0.65, 2)
             gx, gy = 16, HEADER_H + 54
             _rect_alpha(img, (gx - 4, gy - bh - 4), (gx + bw + 4, gy + 6),
                         (20, 70, 20), 0.75)
             cv2.rectangle(img, (gx - 4, gy - bh - 4), (gx + bw + 4, gy + 6),
                           _C['acc_active'], 1)
             cv2.putText(img, badge, (gx, gy),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.58, _C['t_active'], 1, cv2.LINE_AA)
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.65, _C['t_active'], 2, cv2.LINE_AA)
 
         if last_action and (time.time() - action_display_time) < 3.0:
-            (aw, ah), _ = cv2.getTextSize(last_action, cv2.FONT_HERSHEY_SIMPLEX, 0.56, 1)
+            (aw, ah), _ = cv2.getTextSize(last_action, cv2.FONT_HERSHEY_SIMPLEX, 0.65, 2)
             ax, ay = 16, h - 38
             _rect_alpha(img, (ax - 6, ay - ah - 5), (ax + aw + 10, ay + 7),
                         (30, 30, 30), 0.80)
             cv2.rectangle(img, (ax - 6, ay - ah - 5), (ax + aw + 10, ay + 7),
                           _C['t_pill_border'], 1)
             cv2.putText(img, last_action, (ax, ay),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.56, _C['t_cyan'], 1, cv2.LINE_AA)
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.65, _C['t_cyan'], 2, cv2.LINE_AA)
 
     cv2.putText(img, f"{int(fps)} fps", (8, h - 7),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.41, _C['t_grey'], 1, cv2.LINE_AA)
+                cv2.FONT_HERSHEY_SIMPLEX, 0.45, _C['t_grey'], 2, cv2.LINE_AA)
     quit_lbl = "Q  \u2014  quit"
-    (qw, _), _ = cv2.getTextSize(quit_lbl, cv2.FONT_HERSHEY_SIMPLEX, 0.41, 1)
+    (qw, _), _ = cv2.getTextSize(quit_lbl, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 2)
     cv2.putText(img, quit_lbl, (w - qw - 8, h - 7),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.41, _C['t_grey'], 1, cv2.LINE_AA)
+                cv2.FONT_HERSHEY_SIMPLEX, 0.45, _C['t_grey'], 2, cv2.LINE_AA)
 
     return img
 
@@ -1483,7 +1679,7 @@ def main():
 
     # Get screen size for window positioning
     screen_w, screen_h = pyautogui.size()
-    SMALL_WIN_W, SMALL_WIN_H = 320, 240
+    SMALL_WIN_W, SMALL_WIN_H = 480, 270
     WIN_NAME = "GestVoice — Smart Assistant + AI"
     window_positioned = False
 
@@ -1503,6 +1699,11 @@ def main():
         'activation_drop_frames': 0, # To handle flickering during activation
         'persistent_gesture': '',
         'persistent_gesture_time': 0,
+        'scroll_mode': False,
+        'gesture_candidate': None,
+        'candidate_start_time': None,
+        'gesture_lock_until': 0,
+        'prev_avg_y': None,
     }
 
     voice_thread = threading.Thread(
@@ -1522,12 +1723,36 @@ def main():
     print("[OK] Voice commands require 'System' prefix (e.g. 'System open chrome')")
     print("-" * 60)
 
-    # Create named window for positioning
-    cv2.namedWindow(WIN_NAME, cv2.WINDOW_NORMAL)
-
     while True:
         if system_state.get('terminate_system', False):
             break
+
+        # If waiting for login, bypass camera reading, hand tracking, and UI display
+        if current_state == STATE_LOGIN_WAITING:
+            time.sleep(0.2)
+            if window_positioned:
+                cv2.destroyAllWindows()
+                window_positioned = False
+            
+            system_state['voice_activate'] = False
+            session_doc = db["settings"].find_one({"key": "session_state"})
+            if session_doc and session_doc.get("logged_in") and session_doc.get("username"):
+                username = session_doc.get("username")
+                if not FACE_RECOGNITION_AVAILABLE:
+                    current_state = STATE_PASSIVE
+                    speak(f"Welcome back {username}. System unlocked.")
+                    print(f"[STATE] Logged in ({username}) → PASSIVE (Face recognition bypassed)")
+                else:
+                    auth_face_doc = db["settings"].find_one({"key": "user_face", "username": username})
+                    if not auth_face_doc:
+                        current_state = STATE_FACE_REGISTRATION
+                        print(f"[STATE] Logged in ({username}) → FACE REGISTRATION")
+                    else:
+                        current_state = STATE_FACE_VERIFICATION
+                        system_state['verification_start_time'] = time.time()
+                        print(f"[STATE] Logged in ({username}) → FACE VERIFICATION")
+            cv2.waitKey(1)
+            continue
 
         # Handle Continuous Scrolling
         if system_state.get('scroll_speed', 0) != 0:
@@ -1539,28 +1764,121 @@ def main():
 
         img = cv2.flip(img, 1)
         imgRGB = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        imgRGB.flags.writeable = False
-        results = hands.process(imgRGB)
-        imgRGB.flags.writeable = True
+        
+        # Only process gestures/hands if not in FACE_REGISTRATION or FACE_VERIFICATION state
+        process_gestures = current_state not in [STATE_LOGIN_WAITING, STATE_FACE_REGISTRATION, STATE_FACE_VERIFICATION]
 
         curr_time = time.time()
         fps = 1 / (curr_time - prev_time + 1e-9)
         prev_time = curr_time
 
         hand_detected = False
+        left_hand_landmarks = None
+        right_hand_landmarks = None
+        left_handedness = 'Left'
+        right_handedness = 'Right'
         hand_landmarks = None
         handedness = 'Right'
+        is_stable = False
+        spatial_elapsed = 0
+        current_candidate = None
+        stable_gesture_triggered = None
 
-        if results.multi_hand_landmarks and results.multi_handedness:
-            hand_detected = True
-            hand_landmarks = results.multi_hand_landmarks[0].landmark
-            handedness = results.multi_handedness[0].classification[0].label
+        if process_gestures:
+            imgRGB.flags.writeable = False
+            results = hands.process(imgRGB)
+            imgRGB.flags.writeable = True
 
-            mp_draw.draw_landmarks(
-                img, results.multi_hand_landmarks[0],
-                mp_hands.HAND_CONNECTIONS,
-                LANDMARK_STYLE, CONNECTION_STYLE
-            )
+            if results and results.multi_hand_landmarks and results.multi_handedness:
+                hand_detected = True
+                for lm in results.multi_hand_landmarks:
+                    mp_draw.draw_landmarks(
+                        img, lm,
+                        mp_hands.HAND_CONNECTIONS,
+                        LANDMARK_STYLE, CONNECTION_STYLE
+                    )
+                
+                if len(results.multi_hand_landmarks) >= 2:
+                    sorted_hands = sorted(
+                        zip(results.multi_hand_landmarks, results.multi_handedness),
+                        key=lambda h: h[0].landmark[0].x
+                    )
+                    left_hand_landmarks = sorted_hands[0][0].landmark
+                    left_handedness = sorted_hands[0][1].classification[0].label
+                    right_hand_landmarks = sorted_hands[1][0].landmark
+                    right_handedness = sorted_hands[1][1].classification[0].label
+                else:
+                    single_hand_landmarks = results.multi_hand_landmarks[0].landmark
+                    single_label = results.multi_handedness[0].classification[0].label
+                    if single_label == 'Left':
+                        left_hand_landmarks = single_hand_landmarks
+                        left_handedness = 'Left'
+                    else:
+                        right_hand_landmarks = single_hand_landmarks
+                        right_handedness = 'Right'
+
+                if right_hand_landmarks is not None:
+                    hand_landmarks = right_hand_landmarks
+                    handedness = right_handedness
+                else:
+                    hand_landmarks = left_hand_landmarks
+                    handedness = left_handedness
+
+            # Determine spatial stability of the primary hand
+            if hand_detected:
+                wrist = hand_landmarks[0]
+                wrist_x = int(wrist.x * CAMERA_WIDTH)
+                wrist_y = int(wrist.y * CAMERA_HEIGHT)
+                is_stable, spatial_elapsed = stability_tracker.update(wrist_x, wrist_y)
+            else:
+                stability_tracker.reset()
+
+            # Determine the active gesture candidate in this frame and check stability
+            in_cooldown = (curr_time < system_state.get('gesture_lock_until', 0))
+            
+            if hand_detected:
+                if system_state.get('scroll_mode', False):
+                    if left_hand_landmarks is not None and right_hand_landmarks is not None:
+                        left_gesture = gesture_recognizer.detect_static_gesture(left_hand_landmarks, 'Left')
+                        right_gesture = gesture_recognizer.detect_static_gesture(right_hand_landmarks, 'Right')
+                        if left_gesture == 'peace' and right_gesture == 'peace':
+                            current_candidate = 'double_peace'
+                else:
+                    if left_hand_landmarks is not None and right_hand_landmarks is not None:
+                        left_gesture = gesture_recognizer.detect_static_gesture(left_hand_landmarks, 'Left')
+                        right_gesture = gesture_recognizer.detect_static_gesture(right_hand_landmarks, 'Right')
+                        if left_gesture == 'peace' and right_gesture == 'peace':
+                            current_candidate = 'double_peace'
+                        elif left_gesture == 'palm' and right_gesture == 'palm':
+                            current_candidate = 'double_palm'
+                        else:
+                            if right_gesture is not None:
+                                current_candidate = right_gesture
+                            elif left_gesture is not None:
+                                current_candidate = left_gesture
+                    else:
+                        if right_hand_landmarks is not None:
+                            current_candidate = gesture_recognizer.detect_static_gesture(right_hand_landmarks, 'Right')
+                        elif left_hand_landmarks is not None:
+                            current_candidate = gesture_recognizer.detect_static_gesture(left_hand_landmarks, 'Left')
+
+            # Bypass spatial stability check for 'index_cursor' to make cursor activation fast and responsive
+            if current_candidate is not None and (is_stable or current_candidate == 'index_cursor'):
+                if system_state.get('gesture_candidate') == current_candidate:
+                    elapsed = curr_time - system_state.get('candidate_start_time', curr_time)
+                    # Removed 3-sec timer as requested: trigger immediately when stable
+                    required_time = 0.0 
+                    if elapsed >= required_time:
+                        if not in_cooldown:
+                            stable_gesture_triggered = current_candidate
+                        system_state['gesture_candidate'] = None
+                        system_state['candidate_start_time'] = None
+                else:
+                    system_state['gesture_candidate'] = current_candidate
+                    system_state['candidate_start_time'] = curr_time
+            else:
+                system_state['gesture_candidate'] = None
+                system_state['candidate_start_time'] = None
 
         progress = 0
         context = ''
@@ -1583,70 +1901,103 @@ def main():
             session_doc = db["settings"].find_one({"key": "session_state"})
             if session_doc and session_doc.get("logged_in") and session_doc.get("username"):
                 username = session_doc.get("username")
-                # Check if face exists for this user
-                auth_face_doc = db["settings"].find_one({"key": "user_face", "username": username})
-                if not auth_face_doc:
-                    current_state = STATE_FACE_REGISTRATION
-                    print(f"[STATE] Logged in ({username}) → FACE REGISTRATION")
+                if not FACE_RECOGNITION_AVAILABLE:
+                    current_state = STATE_PASSIVE
+                    speak(f"Welcome back {username}. System unlocked.")
+                    print(f"[STATE] Logged in ({username}) → PASSIVE (Face recognition bypassed)")
                 else:
-                    current_state = STATE_FACE_VERIFICATION
-                    print(f"[STATE] Logged in ({username}) → FACE VERIFICATION")
+                    # Check if face exists for this user
+                    auth_face_doc = db["settings"].find_one({"key": "user_face", "username": username})
+                    if not auth_face_doc:
+                        current_state = STATE_FACE_REGISTRATION
+                        print(f"[STATE] Logged in ({username}) → FACE REGISTRATION")
+                    else:
+                        current_state = STATE_FACE_VERIFICATION
+                        system_state['verification_start_time'] = time.time()
+                        print(f"[STATE] Logged in ({username}) → FACE VERIFICATION")
                     
         elif current_state == STATE_FACE_REGISTRATION:
-            system_state['voice_activate'] = False
-            session_doc = db["settings"].find_one({"key": "session_state"})
-            if not session_doc or not session_doc.get("logged_in"):
-                current_state = STATE_LOGIN_WAITING
+            if not FACE_RECOGNITION_AVAILABLE:
+                current_state = STATE_PASSIVE
             else:
-                username = session_doc.get("username")
-                rgb_small = cv2.resize(imgRGB, (0, 0), fx=0.5, fy=0.5)
-                face_locations = face_recognition.face_locations(rgb_small)
-                if face_locations:
-                    face_encodings = face_recognition.face_encodings(rgb_small, face_locations)
-                    if face_encodings:
-                        current_face_encoding = face_encodings[0]
-                        db["settings"].insert_one({
-                            "key": "user_face",
-                            "username": username,
-                            "encoding": current_face_encoding.tolist()
-                        })
-                        current_state = STATE_PASSIVE
-                        speak(f"Face registered for {username}. System unlocked.")
-                        print(f"[STATE] Face Registered ({username}) → PASSIVE")
-                for (top, right, bottom, left) in face_locations:
-                    top *= 2; right *= 2; bottom *= 2; left *= 2
-                    cv2.rectangle(img, (left, top), (right, bottom), (255, 0, 165), 2)
+                system_state['voice_activate'] = False
+                session_doc = db["settings"].find_one({"key": "session_state"})
+                if not session_doc or not session_doc.get("logged_in"):
+                    current_state = STATE_LOGIN_WAITING
+                else:
+                    username = session_doc.get("username")
+                    rgb_small = cv2.resize(imgRGB, (0, 0), fx=0.5, fy=0.5)
+                    face_locations = face_recognition.face_locations(rgb_small)
+                    if face_locations:
+                        face_encodings = face_recognition.face_encodings(rgb_small, face_locations)
+                        if face_encodings:
+                            current_face_encoding = face_encodings[0]
+                            db["settings"].insert_one({
+                                "key": "user_face",
+                                "username": username,
+                                "encoding": current_face_encoding.tolist()
+                            })
+                            # Mark face_verified as True in MongoDB
+                            db["settings"].update_one(
+                                {"key": "session_state"},
+                                {"$set": {"face_verified": True}}
+                            )
+                            current_state = STATE_PASSIVE
+                            speak(f"Face registered for {username}. System unlocked.")
+                            print(f"[STATE] Face Registered ({username}) → PASSIVE")
+                    for (top, right, bottom, left) in face_locations:
+                        top *= 2; right *= 2; bottom *= 2; left *= 2
+                        cv2.rectangle(img, (left, top), (right, bottom), (255, 0, 165), 2)
                     
         elif current_state == STATE_FACE_VERIFICATION:
-            system_state['voice_activate'] = False # Ignore voice
-            session_doc = db["settings"].find_one({"key": "session_state"})
-            if not session_doc or not session_doc.get("logged_in"):
-                current_state = STATE_LOGIN_WAITING
-                print("[STATE] Logged out → LOGIN_WAITING")
+            if not FACE_RECOGNITION_AVAILABLE:
+                current_state = STATE_PASSIVE
             else:
-                username = session_doc.get("username")
-                rgb_small = cv2.resize(imgRGB, (0, 0), fx=0.5, fy=0.5)
-                face_locations = face_recognition.face_locations(rgb_small)
-                if face_locations:
-                    face_encodings = face_recognition.face_encodings(rgb_small, face_locations)
-                    if face_encodings:
-                        current_face_encoding = face_encodings[0]
-                        auth_face_doc = db["settings"].find_one({"key": "user_face", "username": username})
-                        if auth_face_doc:
-                            import numpy as np
-                            known_encoding = np.array(auth_face_doc["encoding"])
-                            matches = face_recognition.compare_faces([known_encoding], current_face_encoding)
-                            if matches[0]:
-                                current_state = STATE_PASSIVE
-                                speak(f"Face verified for {username}. System unlocked.")
-                                print(f"[STATE] Face Verified ({username}) → PASSIVE")
-                            else:
-                                system_state['last_action'] = "Face not matched!"
-                                system_state['action_display_time'] = curr_time
-                                
-                for (top, right, bottom, left) in face_locations:
-                    top *= 2; right *= 2; bottom *= 2; left *= 2
-                    cv2.rectangle(img, (left, top), (right, bottom), (255, 165, 0), 2)
+                system_state['voice_activate'] = False # Ignore voice
+                session_doc = db["settings"].find_one({"key": "session_state"})
+                if not session_doc or not session_doc.get("logged_in"):
+                    current_state = STATE_LOGIN_WAITING
+                    print("[STATE] Logged out → LOGIN_WAITING")
+                else:
+                    username = session_doc.get("username")
+                    
+                    # 3-second timeout check (fast response)
+                    start_time = system_state.get('verification_start_time')
+                    if start_time and (curr_time - start_time > 3.0):
+                        db["settings"].update_one(
+                            {"key": "session_state"},
+                            {"$set": {"verification_failed": True, "logged_in": False}}
+                        )
+                        speak("Face verification failed. Logging out.")
+                        print(f"[STATE] Face Verification Timeout ({username}) → LOGIN_WAITING")
+                        current_state = STATE_LOGIN_WAITING
+                    else:
+                        rgb_small = cv2.resize(imgRGB, (0, 0), fx=0.5, fy=0.5)
+                        face_locations = face_recognition.face_locations(rgb_small)
+                        if face_locations:
+                            face_encodings = face_recognition.face_encodings(rgb_small, face_locations)
+                            if face_encodings:
+                                current_face_encoding = face_encodings[0]
+                                auth_face_doc = db["settings"].find_one({"key": "user_face", "username": username})
+                                if auth_face_doc:
+                                    import numpy as np
+                                    known_encoding = np.array(auth_face_doc["encoding"])
+                                    matches = face_recognition.compare_faces([known_encoding], current_face_encoding)
+                                    if matches[0]:
+                                        db["settings"].update_one(
+                                            {"key": "session_state"},
+                                            {"$set": {"face_verified": True}}
+                                        )
+                                        current_state = STATE_PASSIVE
+                                        speak(f"Face verified for {username}. System unlocked.")
+                                        print(f"[STATE] Face Verified ({username}) → PASSIVE")
+                                    else:
+                                        system_state['last_action'] = "Face not matched!"
+                                        system_state['action_display_time'] = curr_time
+                                        
+                        for (top, right, bottom, left) in face_locations:
+                            top *= 2; right *= 2; bottom *= 2; left *= 2
+                            cv2.rectangle(img, (left, top), (right, bottom), (255, 165, 0), 2)
 
         elif current_state == STATE_PASSIVE:
 
@@ -1666,15 +2017,11 @@ def main():
                 log_event(event_type="system", command="System Active", action="Activated via Voice", status="completed")
 
             elif hand_detected:
-                wrist = hand_landmarks[0]
-                wrist_x = int(wrist.x * CAMERA_WIDTH)
-                wrist_y = int(wrist.y * CAMERA_HEIGHT)
-                is_stable, elapsed = stability_tracker.update(wrist_x, wrist_y)
                 current_gesture = gesture_recognizer.detect_static_gesture(hand_landmarks, handedness)
                 
                 if is_stable and current_gesture == 'palm':
                     current_state = STATE_ACTIVATING
-                    progress = min(elapsed / ACTIVATION_TIME, 1.0)
+                    progress = min(spatial_elapsed / ACTIVATION_TIME, 1.0)
 
             else:
                 stability_tracker.reset()
@@ -1683,15 +2030,11 @@ def main():
 
             if hand_detected:
                 system_state['activation_drop_frames'] = 0
-                wrist = hand_landmarks[0]
-                wrist_x = int(wrist.x * CAMERA_WIDTH)
-                wrist_y = int(wrist.y * CAMERA_HEIGHT)
-                is_stable, elapsed = stability_tracker.update(wrist_x, wrist_y)
                 current_gesture = gesture_recognizer.detect_static_gesture(hand_landmarks, handedness)
 
                 if is_stable and current_gesture == 'palm':
-                    progress = min(elapsed / ACTIVATION_TIME, 1.0)
-                    if elapsed >= ACTIVATION_TIME:
+                    progress = min(spatial_elapsed / ACTIVATION_TIME, 1.0)
+                    if spatial_elapsed >= ACTIVATION_TIME:
                         current_state = STATE_ACTIVE
                         last_interaction_time = time.time()
                         system_state['last_interaction'] = last_interaction_time
@@ -1767,169 +2110,111 @@ def main():
 
 
             if hand_detected:
-                cursor_enabled = system_state.get('cursor_enabled', True)
-                cursor_active = system_state.get('cursor_active', False)
-
-                if cursor_enabled:
-                    # Check for static gestures first (they override cursor)
-                    raw_static_gesture = gesture_recognizer.detect_static_gesture(
-                        hand_landmarks, handedness
-                    )
-                    
-                    static_gesture = None
-                    if raw_static_gesture:
-                        if gesture_recognizer.current_static_gesture == raw_static_gesture:
-                            # Hold gesture steady for 3.5 seconds before it triggers
-                            if curr_time - gesture_recognizer.static_gesture_start_time >= 3.5:
-                                static_gesture = raw_static_gesture
-                                # reset so it doesn't trigger repeatedly every frame
-                                gesture_recognizer.static_gesture_start_time = curr_time 
-                        else:
-                            gesture_recognizer.current_static_gesture = raw_static_gesture
-                            gesture_recognizer.static_gesture_start_time = curr_time
-                    else:
-                        gesture_recognizer.current_static_gesture = None
-                        gesture_recognizer.static_gesture_start_time = curr_time
-                    
-                    if static_gesture and (curr_time - gesture_recognizer.last_gesture_time >= GESTURE_COOLDOWN):
-                        # Static gesture detected → exit cursor, execute gesture
-                        if cursor_active:
+                if system_state.get('scroll_mode', False):
+                    if stable_gesture_triggered == 'double_peace':
+                        execute_stable_gesture('double_peace', system_state, context, gesture_recognizer)
+                        system_state['gesture_lock_until'] = curr_time + 1.0
+                        if system_state.get('cursor_active', False):
                             cursor_controller.release()
                             system_state['cursor_active'] = False
-                            cursor_active = False
-                        
-                        gesture_recognizer.last_gesture_time = curr_time
-                        gesture_recognizer.wrist_history.clear()
-                        detected_gesture = static_gesture
+                        system_state['prev_avg_y'] = None
+                    else:
+                        if left_hand_landmarks is not None and right_hand_landmarks is not None:
+                            avg_y = (left_hand_landmarks[0].y + right_hand_landmarks[0].y) / 2.0
+                            if system_state.get('prev_avg_y') is not None:
+                                dy = avg_y - system_state['prev_avg_y']
+                                if abs(dy) > 0.008:
+                                    scroll_amount = int(-dy * 2500)
+                                    pyautogui.scroll(scroll_amount)
+                                    last_interaction_time = curr_time
+                                    system_state['last_interaction'] = curr_time
+                                    if scroll_amount > 0:
+                                        system_state['last_action'] = "↕️ Scrolling Up"
+                                    else:
+                                        system_state['last_action'] = "↕️ Scrolling Down"
+                                    system_state['action_display_time'] = curr_time
+                            system_state['prev_avg_y'] = avg_y
+                        else:
+                            system_state['prev_avg_y'] = None
+                else:
+                    system_state['prev_avg_y'] = None
+                    if stable_gesture_triggered is not None:
+                        if stable_gesture_triggered == 'index_cursor':
+                            system_state['cursor_active'] = True
+                            speak("Cursor activated")
+                            system_state['last_action'] = "🖱️ Cursor Activated"
+                            system_state['action_display_time'] = curr_time
+                            log_event(event_type="gesture", command="Cursor Activated", action="Cursor On", status="completed")
+                        else:
+                            if system_state.get('cursor_active', False):
+                                cursor_controller.release()
+                            execute_stable_gesture(stable_gesture_triggered, system_state, context, gesture_recognizer)
+                        system_state['gesture_lock_until'] = curr_time + 1.0
+                        detected_gesture = stable_gesture_triggered
+                    elif system_state.get('cursor_active', False):
+                        # Cursor stays active until peace sign — pass all landmarks
+                        # to cursor_controller which checks for peace sign internally
+                        cursor_info = cursor_controller.update(hand_landmarks, img, context=context)
                         last_interaction_time = curr_time
                         system_state['last_interaction'] = last_interaction_time
                         
-                        # Handle scroll modifications directly
-                        if static_gesture == 'fist':
-                            system_state['scroll_speed'] = -10
-                            action_desc = "Scroll Down Slowly"
-                            action_text = f"✋ Fist → {action_desc} [{context}]"
-                            system_state['last_action'] = action_text
+                        if cursor_info.get('deactivate_cursor'):
+                            # Peace sign detected — deactivate cursor
+                            system_state['cursor_enabled'] = False
+                            system_state['cursor_active'] = False
+                            cursor_controller.release()
+                            system_state['last_action'] = "🖱️ Cursor Deactivated"
                             system_state['action_display_time'] = curr_time
-                            speak(action_desc)
-                            log_event(event_type="gesture", command="Fist", action="Scroll Down Slowly", status="completed")
-                        elif static_gesture == 'palm':
-                            system_state['scroll_speed'] = 0
-                            action_desc = "Stop Scrolling"
-                            action_text = f"✋ Palm → {action_desc} [{context}]"
-                            system_state['last_action'] = action_text
+                            speak("Cursor deactivated.")
+                            log_event(event_type="gesture", command="Cursor Deactivated", action="Cursor Off", status="completed")
+                        elif cursor_info.get('left_click'):
+                            system_state['last_action'] = "🖱️ Left Click"
                             system_state['action_display_time'] = curr_time
-                            speak(action_desc)
-                            log_event(event_type="gesture", command="Palm", action="Stop Scrolling", status="completed")
-                        else:
-                            action_desc = execute_gesture_action(static_gesture, context)
-                            if action_desc:
-                                action_text = f"✋ {static_gesture.replace('_', ' ').title()} → {action_desc} [{context}]"
-                                system_state['last_action'] = action_text
-                                system_state['action_display_time'] = curr_time
-                                print(f"[GESTURE] {action_text}")
-                                speak(action_desc)
-                                log_event(event_type="gesture", command=static_gesture.replace('_', ' ').title(), action=action_desc, status="completed")
-                    else:
-                        # No static gesture → check for index pointing (cursor)
-                        pointing = is_index_pointing(hand_landmarks, handedness)
+                            log_event(event_type="gesture", command="Left Click", action="Click Executed", status="completed")
+                        elif cursor_info.get('right_click'):
+                            system_state['last_action'] = "🖱️ Right Click"
+                            system_state['action_display_time'] = curr_time
+                            log_event(event_type="gesture", command="Right Click", action="Click Executed", status="completed")
+                        elif cursor_info.get('dragging'):
+                            system_state['last_action'] = "🖱️ Dragging"
+                            system_state['action_display_time'] = curr_time
+                            log_event(event_type="gesture", command="Drag", action="Dragging Executed", status="completed")
                         
-                        if pointing:
-                            # Cursor tracking mode
-                            system_state['cursor_active'] = True
-                            cursor_info = cursor_controller.update(hand_landmarks, img)
+                        swipe = gesture_recognizer.detect_swipe(hand_landmarks, handedness, CAMERA_WIDTH)
+                        if swipe:
+                            cursor_controller.release()
+                            detected_gesture = swipe
                             last_interaction_time = curr_time
                             system_state['last_interaction'] = last_interaction_time
-                            
-                            if cursor_info.get('deactivate_cursor'):
-                                system_state['cursor_enabled'] = False
-                                system_state['cursor_active'] = False
-                                cursor_controller.release()
-                                cursor_active = False
-                                system_state['last_action'] = "🖱️ Cursor Deactivated"
+                            action_desc = execute_gesture_action(swipe, context)
+                            if action_desc:
+                                action_text = f"✋ {swipe.replace('_', ' ').title()} → {action_desc} [{context}]"
+                                system_state['last_action'] = action_text
                                 system_state['action_display_time'] = curr_time
-                                speak("Cursor deactivated.")
-                                log_event(event_type="gesture", command="Cursor Deactivated", action="Cursor Off", status="completed")
-                            elif cursor_info.get('left_click'):
-                                system_state['last_action'] = "🖱️ Left Click"
+                                speak(action_desc)
+                                log_event(event_type="gesture", command=swipe.replace('_', ' ').title(), action=action_desc, status="completed")
+                                system_state['gesture_lock_until'] = curr_time + 1.0
+                    else:
+                        # Not in cursor mode, check for swipe actions
+                        swipe = gesture_recognizer.detect_swipe(hand_landmarks, handedness, CAMERA_WIDTH)
+                        if swipe:
+                            detected_gesture = swipe
+                            last_interaction_time = curr_time
+                            system_state['last_interaction'] = last_interaction_time
+                            action_desc = execute_gesture_action(swipe, context)
+                            if action_desc:
+                                action_text = f"✋ {swipe.replace('_', ' ').title()} → {action_desc} [{context}]"
+                                system_state['last_action'] = action_text
                                 system_state['action_display_time'] = curr_time
-                                log_event(event_type="gesture", command="Left Click", action="Click Executed", status="completed")
-                            elif cursor_info.get('right_click'):
-                                system_state['last_action'] = "🖱️ Right Click"
-                                system_state['action_display_time'] = curr_time
-                                log_event(event_type="gesture", command="Right Click", action="Click Executed", status="completed")
-                            elif cursor_info.get('dragging'):
-                                system_state['last_action'] = "🖱️ Dragging"
-                                system_state['action_display_time'] = curr_time
-                                log_event(event_type="gesture", command="Drag", action="Dragging Executed", status="completed")
-                            
-                            # Check for swipes even during cursor mode
-                            swipe = gesture_recognizer.detect_swipe(
-                                hand_landmarks, handedness, CAMERA_WIDTH
-                            )
-                            if swipe and (curr_time - gesture_recognizer.last_gesture_time >= GESTURE_COOLDOWN):
-                                cursor_controller.release()
-                                system_state['cursor_active'] = False
-                                gesture_recognizer.last_gesture_time = curr_time
-                                detected_gesture = swipe
-                                last_interaction_time = curr_time
-                                system_state['last_interaction'] = last_interaction_time
-                                action_desc = execute_gesture_action(swipe, context)
-                                if action_desc:
-                                    action_text = f"✋ {swipe.replace('_', ' ').title()} → {action_desc} [{context}]"
-                                    system_state['last_action'] = action_text
-                                    system_state['action_display_time'] = curr_time
-                                    print(f"[GESTURE] {action_text}")
-                                    speak(action_desc)
-                                    log_event(event_type="gesture", command=swipe.replace('_', ' ').title(), action=action_desc, status="completed")
-                        else:
-                            # Not pointing, no gesture → check swipes only
-                            if cursor_active:
-                                cursor_controller.release()
-                                system_state['cursor_active'] = False
-                            swipe = gesture_recognizer.detect_swipe(
-                                hand_landmarks, handedness, CAMERA_WIDTH
-                            )
-                            if swipe and (curr_time - gesture_recognizer.last_gesture_time >= GESTURE_COOLDOWN):
-                                gesture_recognizer.last_gesture_time = curr_time
-                                detected_gesture = swipe
-                                last_interaction_time = curr_time
-                                system_state['last_interaction'] = last_interaction_time
-                                action_desc = execute_gesture_action(swipe, context)
-                                if action_desc:
-                                    action_text = f"✋ {swipe.replace('_', ' ').title()} → {action_desc} [{context}]"
-                                    system_state['last_action'] = action_text
-                                    system_state['action_display_time'] = curr_time
-                                    print(f"[GESTURE] {action_text}")
-                                    speak(action_desc)
-                                    log_event(event_type="gesture", command=swipe.replace('_', ' ').title(), action=action_desc, status="completed")
-                else:
-                    # Cursor disabled → use original gesture recognition only
-                    gesture = gesture_recognizer.recognize(
-                        hand_landmarks, handedness, CAMERA_WIDTH
-                    )
-                    if gesture:
-                        detected_gesture = gesture
-                        last_interaction_time = curr_time
-                        system_state['last_interaction'] = last_interaction_time
-                        action_desc = execute_gesture_action(gesture, context)
-                        if action_desc:
-                            action_text = f"✋ {gesture.replace('_', ' ').title()} → {action_desc} [{context}]"
-                            system_state['last_action'] = action_text
-                            system_state['action_display_time'] = curr_time
-                            print(f"[GESTURE] {action_text}")
-                            speak(action_desc)
-                            log_event(event_type="gesture", command=gesture.replace('_', ' ').title(), action=action_desc, status="completed")
+                                speak(action_desc)
+                                log_event(event_type="gesture", command=swipe.replace('_', ' ').title(), action=action_desc, status="completed")
+                                system_state['gesture_lock_until'] = curr_time + 1.0
             else:
-
-                # No hand detected → release cursor
-                if system_state.get('cursor_active', False):
-                    cursor_controller.release()
-                    system_state['cursor_active'] = False
-                
-                # Stop scroll if hand (fist) is out of screen
+                # Hand not detected — keep cursor active (don't release on hand loss)
+                # Only scroll and avg_y should reset when hand disappears
                 if system_state.get('scroll_speed', 0) != 0:
                     system_state['scroll_speed'] = 0
+                system_state['prev_avg_y'] = None
 
         elif current_state == STATE_DICTATION:
             
@@ -1957,20 +2242,32 @@ def main():
                 continue
 
             if hand_detected:
-                gesture = gesture_recognizer.recognize(
-                    hand_landmarks, handedness, CAMERA_WIDTH
-                )
-                if gesture:
-                    detected_gesture = gesture
-                    last_interaction_time = time.time()
+                if stable_gesture_triggered is not None:
+                    detected_gesture = stable_gesture_triggered
+                    last_interaction_time = curr_time
                     system_state['last_interaction'] = last_interaction_time
-                    action_desc = execute_gesture_action(gesture, context)
+                    action_desc = execute_gesture_action(stable_gesture_triggered, context)
                     if action_desc:
-                        action_text = f"✋ {gesture.replace('_', ' ').title()} → {action_desc} [{context}]"
+                        action_text = f"✋ {stable_gesture_triggered.replace('_', ' ').title()} → {action_desc} [{context}]"
                         system_state['last_action'] = action_text
-                        system_state['action_display_time'] = time.time()
+                        system_state['action_display_time'] = curr_time
                         print(f"[GESTURE] {action_text}")
                         speak(action_desc)
+                        system_state['gesture_lock_until'] = curr_time + 1.0
+                elif current_candidate is None and not in_cooldown:
+                    swipe = gesture_recognizer.detect_swipe(hand_landmarks, handedness, CAMERA_WIDTH)
+                    if swipe:
+                        detected_gesture = swipe
+                        last_interaction_time = curr_time
+                        system_state['last_interaction'] = last_interaction_time
+                        action_desc = execute_gesture_action(swipe, context)
+                        if action_desc:
+                            action_text = f"✋ {swipe.replace('_', ' ').title()} → {action_desc} [{context}]"
+                            system_state['last_action'] = action_text
+                            system_state['action_display_time'] = curr_time
+                            print(f"[GESTURE] {action_text}")
+                            speak(action_desc)
+                            system_state['gesture_lock_until'] = curr_time + 1.0
 
         system_state['state'] = current_state
 
@@ -1982,31 +2279,56 @@ def main():
         if time.time() - system_state.get('persistent_gesture_time', 0) < 4.0:
             display_gesture = system_state.get('persistent_gesture', '')
 
-        img = draw_ui(
-            img,
-            state=current_state,
-            fps=fps,
-            progress=progress,
-            context=context,
-            last_action=system_state.get('last_action', ''),
-            action_display_time=system_state.get('action_display_time', 0),
-            inactivity_remaining=inactivity_remaining if current_state == STATE_ACTIVE else 0,
-            detected_gesture=display_gesture
-        )
+        # Calculate gesture hold progress for UI
+        g_hold_progress = 0
+        g_hold_name = ""
+        if system_state.get('gesture_candidate') is not None and system_state.get('candidate_start_time') is not None:
+            g_elapsed = curr_time - system_state['candidate_start_time']
+            required_time = 0.0
+            g_hold_progress = 1.0 if g_elapsed >= required_time else 0.0
+            g_hold_name = system_state['gesture_candidate']
 
-        # Resize frame for small window display
-        img_small = cv2.resize(img, (SMALL_WIN_W, SMALL_WIN_H))
-        cv2.imshow(WIN_NAME, img_small)
+        show_window = current_state not in [STATE_LOGIN_WAITING]
+        
+        if show_window:
+            if current_state in [STATE_FACE_REGISTRATION, STATE_FACE_VERIFICATION]:
+                # Draw a simple overlay for Face Auth
+                cv2.putText(img, "FACE AUTHENTICATION", (20, 40), cv2.FONT_HERSHEY_DUPLEX, 1.0, (255, 200, 0), 2)
+                cv2.putText(img, "Looking for face...", (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (200, 200, 200), 2)
+            else:
+                img = draw_ui(
+                    img,
+                    state=current_state,
+                    fps=fps,
+                    progress=progress,
+                    context=context,
+                    last_action=system_state.get('last_action', ''),
+                    action_display_time=system_state.get('action_display_time', 0),
+                    inactivity_remaining=inactivity_remaining if current_state == STATE_ACTIVE else 0,
+                    detected_gesture=display_gesture,
+                    scroll_mode=system_state.get('scroll_mode', False),
+                    gesture_hold_progress=g_hold_progress,
+                    gesture_hold_name=g_hold_name,
+                    cursor_active=system_state.get('cursor_active', False)
+                )
 
-        # Position window at top-right corner (once)
-        if not window_positioned:
-            cv2.resizeWindow(WIN_NAME, SMALL_WIN_W, SMALL_WIN_H)
-            cv2.moveWindow(WIN_NAME, screen_w - SMALL_WIN_W - 10, 10)
-            try:
-                cv2.setWindowProperty(WIN_NAME, cv2.WND_PROP_TOPMOST, 1)
-            except Exception:
-                pass
-            window_positioned = True
+            # Resize frame for small window display
+            img_small = cv2.resize(img, (SMALL_WIN_W, SMALL_WIN_H))
+            cv2.imshow(WIN_NAME, img_small)
+
+            # Position window at top-right corner (once)
+            if not window_positioned:
+                cv2.resizeWindow(WIN_NAME, SMALL_WIN_W, SMALL_WIN_H)
+                cv2.moveWindow(WIN_NAME, screen_w - SMALL_WIN_W - 10, 10)
+                try:
+                    cv2.setWindowProperty(WIN_NAME, cv2.WND_PROP_TOPMOST, 1)
+                except Exception:
+                    pass
+                window_positioned = True
+        else:
+            if window_positioned:
+                cv2.destroyAllWindows()
+                window_positioned = False
 
         if cv2.waitKey(1) & 0xFF == ord('q'):
             break

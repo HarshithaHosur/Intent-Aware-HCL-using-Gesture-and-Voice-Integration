@@ -896,3 +896,293 @@ input:checked + .slider:before {
     line-height: 1.6;
     margin-top: -5px;
 }
+
+/* ============================================
+   USERS PANEL - System Operators Dropdown
+   ============================================ */
+
+/* Badge on the users icon button */
+.users-panel-wrapper .btn-icon {
+    position: relative;
+}
+
+.users-badge {
+    position: absolute;
+    top: -4px;
+    right: -4px;
+    background: linear-gradient(135deg, var(--accent-cyan), var(--accent-purple));
+    color: #fff;
+    font-size: 9px;
+    font-weight: 700;
+    min-width: 16px;
+    height: 16px;
+    border-radius: 8px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0 4px;
+    font-family: var(--font-mono);
+    box-shadow: 0 0 8px rgba(20, 153, 211, 0.4);
+    line-height: 1;
+}
+
+/* Dropdown Panel */
+.users-dropdown {
+    position: absolute;
+    top: calc(100% + 10px);
+    right: 0;
+    width: 340px;
+    max-height: 420px;
+    background: rgba(18, 21, 30, 0.92);
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 14px;
+    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5), 0 0 1px rgba(255, 255, 255, 0.1);
+    z-index: 1000;
+    opacity: 0;
+    visibility: hidden;
+    transform: translateY(-8px) scale(0.97);
+    transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+}
+
+.users-dropdown.active {
+    opacity: 1;
+    visibility: visible;
+    transform: translateY(0) scale(1);
+}
+
+/* Dropdown Header */
+.users-dropdown-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 16px 18px 12px 18px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.users-dropdown-header h4 {
+    margin: 0;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    letter-spacing: 1.5px;
+    color: var(--text-primary);
+    text-transform: uppercase;
+}
+
+.users-count-label {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: var(--accent-cyan);
+    background: rgba(20, 153, 211, 0.1);
+    padding: 3px 8px;
+    border-radius: 10px;
+    border: 1px solid rgba(20, 153, 211, 0.2);
+}
+
+/* Users List */
+.users-dropdown-list {
+    overflow-y: auto;
+    padding: 8px;
+    flex: 1;
+    max-height: 350px;
+}
+
+.users-dropdown-list::-webkit-scrollbar {
+    width: 4px;
+}
+
+.users-dropdown-list::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+.users-dropdown-list::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.1);
+    border-radius: 4px;
+}
+
+.users-loading {
+    text-align: center;
+    color: var(--text-secondary);
+    font-size: 12px;
+    padding: 20px 0;
+    font-family: var(--font-mono);
+}
+
+/* Individual User Card */
+.user-card {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 12px;
+    border-radius: 10px;
+    transition: all 0.2s ease;
+    cursor: default;
+}
+
+.user-card:hover {
+    background: rgba(255, 255, 255, 0.04);
+}
+
+/* Avatar circle with initial */
+.user-card-avatar {
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    background: linear-gradient(135deg, rgba(20, 153, 211, 0.25), rgba(135, 94, 255, 0.25));
+    border: 1px solid rgba(135, 94, 255, 0.3);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: var(--font-mono);
+    font-size: 14px;
+    font-weight: 700;
+    color: var(--text-primary);
+    flex-shrink: 0;
+}
+
+/* User info */
+.user-card-info {
+    flex: 1;
+    min-width: 0;
+}
+
+.user-card-name {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-primary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.user-card-email {
+    font-size: 11px;
+    color: var(--text-secondary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    margin-top: 1px;
+}
+
+.user-card-date {
+    font-size: 9px;
+    color: var(--text-secondary);
+    opacity: 0.6;
+    font-family: var(--font-mono);
+    margin-top: 2px;
+}
+
+/* Face status indicator */
+.user-card-status {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 3px;
+    flex-shrink: 0;
+}
+
+.user-card-status .status-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    display: block;
+}
+
+.user-card-status .status-label {
+    font-family: var(--font-mono);
+    font-size: 8px;
+    letter-spacing: 0.5px;
+    font-weight: 600;
+}
+
+.user-card-status.face-ok .status-dot {
+    background: #10b981;
+    box-shadow: 0 0 8px rgba(16, 185, 129, 0.5);
+}
+
+.user-card-status.face-ok .status-label {
+    color: #10b981;
+}
+
+.user-card-status.face-missing .status-dot {
+    background: #f59e0b;
+    box-shadow: 0 0 8px rgba(245, 158, 11, 0.4);
+}
+
+.user-card-status.face-missing .status-label {
+    color: #f59e0b;
+}
+
+/* Premium Users Dropdown Trigger Button */
+.users-dropdown-trigger {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    padding: 6px 12px;
+    border-radius: 20px;
+    color: var(--text-secondary);
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.2s ease-in-out;
+    position: relative;
+    user-select: none;
+}
+
+.users-dropdown-trigger:hover {
+    background: rgba(0, 229, 255, 0.08);
+    border-color: rgba(0, 229, 255, 0.3);
+    color: var(--accent-cyan);
+    box-shadow: 0 0 12px rgba(0, 229, 255, 0.15);
+}
+
+.users-dropdown-trigger.active {
+    background: rgba(0, 229, 255, 0.12);
+    border-color: var(--accent-cyan);
+    color: var(--accent-cyan);
+    box-shadow: 0 0 16px rgba(0, 229, 255, 0.25);
+}
+
+.users-dropdown-trigger .users-badge {
+    position: static; /* override absolute positioning */
+    background: linear-gradient(135deg, var(--accent-cyan), var(--accent-purple));
+    color: #fff;
+    font-size: 10px;
+    font-weight: 700;
+    min-width: 18px;
+    height: 18px;
+    border-radius: 9px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0 5px;
+    font-family: var(--font-mono);
+    box-shadow: 0 0 8px rgba(0, 229, 255, 0.3);
+    line-height: 1;
+}
+
+.users-dropdown-trigger .arrow-icon {
+    font-size: 9px;
+    transition: transform 0.2s ease;
+    display: inline-block;
+    color: var(--text-secondary);
+    opacity: 0.7;
+}
+
+.users-dropdown-trigger:hover .arrow-icon,
+.users-dropdown-trigger.active .arrow-icon {
+    color: var(--accent-cyan);
+    opacity: 1;
+}
+
+.users-dropdown-trigger.active .arrow-icon {
+    transform: rotate(180deg);
+}
+
+

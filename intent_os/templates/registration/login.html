@@ -131,7 +131,12 @@
             <p>System Authentication Required</p>
         </div>
         
-        {% if form.errors %}
+        {% if request.GET.error == 'face_failed' %}
+        <div class="error-message">
+            ⚠ Face verification failed — the face detected doesn't match this account.<br>
+            If you are a different user, please <a href="{% url 'signup' %}" style="color: #1499d3; font-weight: 600;">create your own account</a>.
+        </div>
+        {% elif form.errors %}
         <div class="error-message">
             Invalid username or password.
         </div>

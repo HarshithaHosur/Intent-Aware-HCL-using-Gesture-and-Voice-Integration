@@ -14,11 +14,28 @@ from django.dispatch import receiver
 
 @receiver(user_logged_in)
 def set_logged_in(sender, user, request, **kwargs):
-    settings_collection.update_one({"key": "session_state"}, {"$set": {"logged_in": True, "username": user.username}}, upsert=True)
+    import time
+    # Clear any stale face_verified flag from previous sessions
+    request.session['face_verified'] = False
+    settings_collection.update_one(
+        {"key": "session_state"},
+        {"$set": {
+            "logged_in": True,
+            "username": user.username,
+            "face_verified": False,
+            "verification_failed": False,
+            "login_time": time.time()
+        }},
+        upsert=True
+    )
 
 @receiver(user_logged_out)
 def set_logged_out(sender, user, request, **kwargs):
-    settings_collection.update_one({"key": "session_state"}, {"$set": {"logged_in": False}}, upsert=True)
+    settings_collection.update_one(
+        {"key": "session_state"},
+        {"$set": {"logged_in": False, "face_verified": False, "verification_failed": False}},
+        upsert=True
+    )
 
 # Initial Data for Database Seeding
 INITIAL_STATE = {
@@ -166,6 +183,12 @@ def init_db():
             voice_collection.insert_many([dict(c) for c in INITIAL_STATE['voice_commands']])
         if settings_collection.count_documents({"key": "wake_word"}) == 0:
             settings_collection.insert_one({"key": "wake_word", "value": INITIAL_STATE['wake_word']})
+        # Reset session state on server start so users must log in fresh
+        settings_collection.update_one(
+            {"key": "session_state"},
+            {"$set": {"logged_in": False, "face_verified": False, "verification_failed": False}},
+            upsert=True
+        )
     except Exception as e:
         print(f"MongoDB connection error: {e}")
 
@@ -186,8 +209,53 @@ def signup(request):
     return render(request, 'registration/signup.html', {'form': form})
 
 def custom_logout(request):
+    # Flush session completely so no stale auth persists
+    request.session.flush()
     logout(request)
+    error = request.GET.get('error')
+    if error:
+        return redirect(f'/accounts/login/?error={error}')
     return redirect('login')
+
+@login_required
+def face_register(request):
+    username = request.user.username
+    face_doc = settings_collection.find_one({"key": "user_face", "username": username})
+    if face_doc:
+        return redirect('dashboard_home')
+    return render(request, 'registration/face_register.html')
+
+@login_required
+def face_verify(request):
+    username = request.user.username
+    face_doc = settings_collection.find_one({"key": "user_face", "username": username})
+    if not face_doc:
+        return redirect('face_register')
+    
+    if request.session.get('face_verified', False):
+        return redirect('dashboard_home')
+        
+    return render(request, 'registration/face_verify.html')
+
+@login_required
+def api_face_status(request):
+    username = request.user.username
+    
+    # Check if face is registered
+    face_doc = settings_collection.find_one({"key": "user_face", "username": username})
+    if not face_doc:
+        return JsonResponse({'status': 'not_registered'})
+    
+    # Check session_state in MongoDB
+    session_doc = settings_collection.find_one({"key": "session_state"})
+    if session_doc:
+        if session_doc.get("face_verified"):
+            request.session['face_verified'] = True
+            return JsonResponse({'status': 'verified'})
+        elif session_doc.get("verification_failed"):
+            return JsonResponse({'status': 'failed'})
+            
+    return JsonResponse({'status': 'verifying'})
 
 @login_required
 def dashboard_home(request):
@@ -326,3 +394,23 @@ def api_system_status(request):
                 'database_online': False,
                 'message': str(e)
             })
+
+@login_required
+def api_registered_users(request):
+    """Returns all registered users with their face registration status."""
+    if request.method == 'GET':
+        try:
+            from django.contrib.auth.models import User
+            users = User.objects.all().order_by('-date_joined')
+            user_list = []
+            for u in users:
+                face_doc = settings_collection.find_one({"key": "user_face", "username": u.username})
+                user_list.append({
+                    'username': u.username,
+                    'email': u.email,
+                    'date_joined': u.date_joined.strftime('%b %d, %Y'),
+                    'face_registered': bool(face_doc),
+                })
+            return JsonResponse({'status': 'success', 'users': user_list, 'total': len(user_list)})
+        except Exception as e:
+            return JsonResponse({'status': 'error', 'message': str(e)})

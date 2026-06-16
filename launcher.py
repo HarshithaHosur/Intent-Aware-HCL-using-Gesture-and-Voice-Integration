@@ -1,5 +1,5 @@
 """
-GestVoice Launcher - Unified entry point for starting AETHER_CORE.
+GestVoice Launcher - Unified entry point for starting INTENT_OS
 Runs Django development server in a managed background process,
 automatically launches the web browser to the dashboard,
 and runs the AI gesture + voice assistant on the main thread.
@@ -34,7 +34,7 @@ def open_dashboard():
     """Waits for Django to initialize, then opens the dashboard in the browser."""
     print("[SYSTEM] Initializing AI components and camera feed...")
     time.sleep(3.0)
-    print("[SYSTEM] Opening AETHER_CORE dashboard at http://127.0.0.1:8000/ ...")
+    print("[SYSTEM] Opening INTENT_OS dashboard at http://127.0.0.1:8000/ ...")
     webbrowser.open("http://127.0.0.1:8000/")
 
 # Only start Django and the browser if running as raw Python (not compiled standalone EXE)
